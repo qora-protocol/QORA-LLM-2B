@@ -1,3 +1,17 @@
+---
+license: apache-2.0
+language:
+  - en
+tags:
+  - ternary
+  - bitnet
+  - rust
+  - inference
+  - cpu
+base_model: microsoft/bitnet-b1.58-2B-4T
+pipeline_tag: text-generation
+---
+
 # QORA-LLM-2B
 
 Pure Rust ternary inference engine based on [BitNet b1.58-2B-4T](https://huggingface.co/microsoft/bitnet-b1.58-2B-4T). No Python, no CUDA, no external ML frameworks. Single executable + model weights = portable AI that runs on any machine.
