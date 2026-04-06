@@ -12,6 +12,21 @@
 
 use half::f16;
 use rayon::prelude::*;
+use std::sync::OnceLock;
+
+use crate::simd;
+
+/// Cached AVX-512 detection (checked once, reused forever).
+fn use_avx512() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        let avx = simd::has_avx512();
+        if avx {
+            eprintln!("[QOR2B] AVX-512 detected — using SIMD ternary kernels");
+        }
+        avx
+    })
+}
 
 // ============================================================
 // Weight types
@@ -266,6 +281,7 @@ fn write_f32_vec_io(w: &mut impl std::io::Write, data: &[f32]) -> std::io::Resul
 
 /// Single-threaded ternary GEMV for k_start..k_end.
 /// Uses LUT: [0.0, +x, -x, 0.0] for branchless decode.
+/// Dispatches to AVX-512 SIMD kernel when available.
 #[inline]
 fn ternary_gemv_inner(
     input: &[f32],
@@ -277,6 +293,15 @@ fn ternary_gemv_inner(
     k_end: usize,
     apply_scale: bool,
 ) -> Vec<f32> {
+    // AVX-512 fast path
+    #[cfg(target_arch = "x86_64")]
+    if use_avx512() {
+        return unsafe {
+            simd::ternary_gemv_avx512(input, packed, scale, _k, n, k_start, k_end, apply_scale)
+        };
+    }
+
+    // Scalar fallback
     let bytes_per_row = (n + 3) / 4;
     let full_quads = n / 4;
     let remainder = n % 4;
@@ -359,15 +384,13 @@ fn ternary_gemv(input: &[f32], weight: &TernaryWeight) -> Vec<f32> {
 
 /// Fused gate+up ternary GEMV: single input read, dual accumulation.
 /// Computes relu²(gate(x)) * up(x) with fused projections.
+/// Dispatches to AVX-512 SIMD kernel when available.
 fn fused_relu2_gate_up(input: &[f32], gate_w: &TernaryWeight, up_w: &TernaryWeight) -> Vec<f32> {
     let k = gate_w.k;
     let n = gate_w.n;
 
     let num_threads = rayon::current_num_threads();
     let chunk_k = (k + num_threads - 1) / num_threads;
-    let bytes_per_row = (n + 3) / 4;
-    let full_quads = n / 4;
-    let remainder = n % 4;
 
     let partials: Vec<(Vec<f32>, Vec<f32>)> = (0..num_threads)
         .into_par_iter()
@@ -375,6 +398,22 @@ fn fused_relu2_gate_up(input: &[f32], gate_w: &TernaryWeight, up_w: &TernaryWeig
             let k_start = t * chunk_k;
             let k_end = ((t + 1) * chunk_k).min(k);
             if k_start >= k { return None; }
+
+            // AVX-512 fast path
+            #[cfg(target_arch = "x86_64")]
+            if use_avx512() {
+                return Some(unsafe {
+                    simd::fused_relu2_gate_up_avx512(
+                        input, &gate_w.packed, gate_w.scale,
+                        &up_w.packed, up_w.scale, k, n, k_start, k_end,
+                    )
+                });
+            }
+
+            // Scalar fallback
+            let bytes_per_row = (n + 3) / 4;
+            let full_quads = n / 4;
+            let remainder = n % 4;
 
             let mut gate_out = vec![0.0f32; n];
             let mut up_out = vec![0.0f32; n];
