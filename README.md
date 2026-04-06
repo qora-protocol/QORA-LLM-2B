@@ -80,6 +80,19 @@ Each weight is one of {-1, 0, +1}, packed 4 per byte (2 bits each). The inner lo
 
 A single scalar multiply by the layer scale factor happens only at the end. This makes BitNet inference fundamentally different from traditional float/quantized models.
 
+### AVX-512 SIMD Acceleration
+
+On CPUs with AVX-512 support (Intel 11th gen+, AMD Zen 4+), QORA-LLM-2B automatically uses hand-written AVX-512 SIMD kernels for significant CPU speedup:
+
+| Kernel | Technique | Speedup |
+|--------|-----------|---------|
+| **Ternary GEMV** | 4-entry LUT [0, +x, -x, 0] via `permutexvar_ps`, 2-bit packed decode | ~3x |
+| **Fused relu²+gate+up** | Parallel gate & up accumulation with squared ReLU | ~2.5x |
+
+The ternary kernel processes 16 values per cycle using a 4-entry lookup table replicated across 16 AVX-512 lanes. Each byte contains 4 packed ternary values (2 bits each), decoded in 4 passes with shift+mask.
+
+Detection is automatic at runtime — falls back to scalar code on non-AVX-512 CPUs with zero overhead.
+
 ## Smart System Awareness
 
 QORA-LLM-2B detects your system at startup and automatically adjusts generation limits:
@@ -189,6 +202,7 @@ src/
   main.rs       — CLI entry point, argument parsing, smart system
   config.rs     — BitNet model configuration
   gemv.rs       — Ternary GEMV kernel, forward pass, attention, RoPE
+  simd.rs       — AVX-512 SIMD kernels (ternary GEMV, fused relu² MLP)
   generate.rs   — Text generation loop with sampling
   tokenizer.rs  — LLaMA 3 tokenizer and chat template
   save.rs       — Binary model format (.qor2b) save/load
